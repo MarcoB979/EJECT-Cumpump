@@ -18,7 +18,7 @@ const int MOTOR_ENA_PIN = 16;
 ///////////////////////////////////////////
 
 // Uncomment the following line if you wish to print DEBUG info
-#define DEBUG 
+//#define DEBUG 
 
 #ifdef DEBUG
 #define LogDebug(...) Serial.println(__VA_ARGS__)
@@ -27,6 +27,18 @@ const int MOTOR_ENA_PIN = 16;
 #define LogDebug(...) ((void)0)
 #define LogDebugFormatted(...) ((void)0)
 #endif
+
+
+#define DEBUGPRIO 
+
+#ifdef DEBUGPRIO
+#define LogDebugPRIO(...) Serial.println(__VA_ARGS__)
+#define LogDebugFormattedPRIO(...) Serial.printf(__VA_ARGS__)
+#else
+#define LogDebugPRIO(...) ((void)0)
+#define LogDebugFormattedPRIO(...) ((void)0)
+#endif
+
 
 #define OSSM 1
 #define CUM 2
@@ -65,6 +77,10 @@ float cum_speed = 1000.0;
 float cum_size = 0.0;
 float cum_accel = 0.0;
 float cum_on = 0;
+
+// Track remaining steps for current squirt
+long stepsRemainingInSquirt = 0;
+const long CHUNK_SIZE = 100; // Small moves to allow parameter updates
 
 // Variable to store if sending data was successful
 String success;
@@ -123,8 +139,8 @@ void espNowRemoteTask(void *pvParameters); // Handels the EspNow Remote
 
 // Callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("\r\nLast Packet Send Status:\t");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  LogDebug("\r\nLast Packet Send Status:\t");
+  LogDebug(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
   if (status ==0){
     success = "Delivery Success :)";
   }
@@ -135,16 +151,16 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 // Callback when data is received
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-Serial.println("Received step 1");
+LogDebug("Received step 1");
   memcpy(&incomingcontrol, incomingData, sizeof(incomingcontrol));
 
-  Serial.print("Received Command: ");
+  LogDebug("Received Command: ");
   LogDebug(incomingcontrol.esp_command);
-  Serial.print("Received value: ");
+  LogDebug("Received value: ");
   LogDebug(incomingcontrol.esp_value);
-  Serial.print("Received to target ID: ");
+  LogDebug("Received to target ID: ");
   LogDebug(incomingcontrol.esp_target);
-  Serial.print("Received from sender: ");
+  LogDebug("Received from sender: ");
   LogDebug(incomingcontrol.esp_sender);
   LogDebugFormatted("from MAC addresss : %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   if(!M5_paired){
@@ -196,18 +212,19 @@ Serial.println("Received step 1");
   }
 
   //if(incomingcontrol.esp_target == EJECT_ID){
-    Serial.print("Received command ");
+    LogDebug("Received command ");
     LogDebug(incomingcontrol.esp_command);
     switch(incomingcontrol.esp_command)
     {
       case CUMSPEED:
       {
-      cum_speed = incomingcontrol.esp_value * 20;
+      cum_speed = incomingcontrol.esp_value * 500;
       }
       break;
       case CUMTIME:
       {
       interval = incomingcontrol.esp_value ;
+      
       }
       break;
       case CUMSIZE:
@@ -217,18 +234,20 @@ Serial.println("Received step 1");
       break;
       case CUMACCEL:
       {
-      cum_accel = incomingcontrol.esp_value * 100;
+      cum_accel = incomingcontrol.esp_value * 500;
       }
       break;
       case ON:
       {
-      cum_on=1;
-      squirts=0;
+//        stepper.releaseEmergencyStop();
+        cum_on=1;
+        squirts=0;
       }
       break;
       case OFF:
       {
       cum_on=0;
+//      stepper.emergencyStop(true);
       }
       break;
       case CONNECT or HEARTBEAT:
@@ -248,8 +267,14 @@ Serial.println("Received step 1");
       }
       break;
     }
-    Serial.print("CUMSPEED: ");
-    LogDebug(cum_speed);
+    LogDebugPRIO("CUMSPEED: ");
+    LogDebugPRIO(cum_speed);
+    LogDebugPRIO("squirts: ");
+    LogDebugPRIO(interval);
+    LogDebugPRIO("Size: ");
+    LogDebugPRIO(cum_size);
+    LogDebugPRIO("Accell: ");
+    LogDebugPRIO(cum_accel);
 
   //}
 }
@@ -258,13 +283,13 @@ void setup()
 {  
     Serial.begin(115200);
     WiFi.mode(WIFI_STA);
-    Serial.print("MAC Address Eject: ");
-    Serial.println(WiFi.macAddress());
+    LogDebug("MAC Address Eject: ");
+    LogDebug(WiFi.macAddress());
     LogDebug(WiFi.macAddress());
 
     // Init ESP-NOW
     if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
+    LogDebug("Error initializing ESP-NOW");
     return;
     }
     // Once ESPNow is successfully Init, we will register for Send CB to
@@ -287,7 +312,7 @@ void setup()
   
       // Add peer        
     if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
+    LogDebug("Failed to add peer");
     return;
     }
     // Register for a callback function that will be called when data is received
@@ -322,65 +347,75 @@ void setup()
   stepper.setAccelerationInStepsPerSecondPerSecond(2000);
   stepper.setDecelerationInStepsPerSecondPerSecond(1000);
   stepper.moveToPositionInSteps(5000);
+  
+  // ============ START SERVICE MODE (COMMENT OUT TO REVERT) ============
+  stepper.startAsService(1); // Run processMovement in background on core 1
+  // ====================================================================
+  
   cum_on=0;
   squirts=0;
-  Serial.print("Status = ");
+  LogDebug("Status = ");
   LogDebug (cum_on);
 }
 
+// ============ SERVICE MODE LOOP (REPLACE WITH OLD CODE TO REVERT) ============
 void loop()
 {
   if (cum_on==1)
   {
-  stepper.setSpeedInStepsPerSecond(cum_speed);
-  stepper.setAccelerationInStepsPerSecondPerSecond(cum_accel);
-  stepper.setDecelerationInStepsPerSecondPerSecond(cum_accel);
-
-  unsigned long currentMillis = millis();
-  if (squirts < interval)
-  {
-    digitalWrite(MOTOR_ENA_PIN, LOW);
-    previousMillis = currentMillis;
-    //if(cum_size>=20.00){
-    //  Serial.println("Indefinite pumping");
-    //  stepper.moveRelativeInSteps(100000000);}
-    //if(!cum_size!=20.00){stepper.moveRelativeInSteps(cum_size);}
-    stepper.moveRelativeInSteps(cum_size);
-    delay(1000/cum_accel/2000);
-  }
-  if (stepper.getDistanceToTargetSigned() == 0){
-     if (squirts <= interval) {
-       squirts=squirts+1;}
-       digitalWrite(MOTOR_ENA_PIN, HIGH);
-       Serial.print("finished squirt ");
-       LogDebug (squirts);}
-     if (squirts > interval){
-       cum_on=0;
-       float squirts=0;
-       Serial.print("Squirts done ");
-       outgoingcontrol.esp_command = OFF;
-       outgoingcontrol.esp_sender = EJECT_ID;
-       outgoingcontrol.esp_target = M5_ID;
-       esp_err_t result = esp_now_send(M5_Remote_Address, (uint8_t *) &outgoingcontrol, sizeof(outgoingcontrol));
-       if (result == !ESP_OK) {
-        LogDebug("Sending to M5 'squirts done' failed");
+    // Update speed/accel - applies immediately to ongoing motion
+    if (cum_speed<0) {cum_speed=10;}
+    if (cum_accel<0) {cum_accel=10;}
+    stepper.setSpeedInStepsPerSecond(cum_speed);
+    stepper.setAccelerationInStepsPerSecondPerSecond(cum_accel);
+    stepper.setDecelerationInStepsPerSecondPerSecond(cum_accel);
+    
+    if (interval > 60)
+    {
+      // Continuous mode: keep setting new target
+      if (stepper.getDistanceToTargetSigned() == 0)
+      {
+        digitalWrite(MOTOR_ENA_PIN, LOW);
+        stepper.setTargetPositionRelativeInSteps(100000); // Large move
+        LogDebugPRIO("Continuous running - speed:" + String(cum_speed));
       }
-
-            //ADD SEND TO M5 TO RESET CUM BUTTON
-       //LogDebug (squirts);
-       Serial.print("Squirts: ");
-       LogDebug (squirts);
-       Serial.print("Status: ");
-       LogDebug (cum_on);
-     }
-     
+    }
+    else
+    {
+      // Normal squirt mode
+      if (squirts < interval && stepper.getDistanceToTargetSigned() == 0)
+      {
+        digitalWrite(MOTOR_ENA_PIN, LOW);
+        stepper.setTargetPositionRelativeInSteps(cum_size);
+        squirts = squirts + 1;
+        LogDebugPRIO("Starting squirt " + String(squirts) + "/" + String(interval) + " size:" + String(cum_size) + " speed:" + String(cum_speed));
+      }
+      
+      // All squirts done?
+      if (squirts >= interval && stepper.getDistanceToTargetSigned() == 0)
+      {
+        cum_on = 0;
+        squirts = 0;
+        digitalWrite(MOTOR_ENA_PIN, HIGH);
+        LogDebug("All squirts done");
+        outgoingcontrol.esp_command = OFF;
+        outgoingcontrol.esp_sender = EJECT_ID;
+        outgoingcontrol.esp_target = M5_ID;
+        esp_err_t result = esp_now_send(M5_Remote_Address, (uint8_t *) &outgoingcontrol, sizeof(outgoingcontrol));
+        if (result != ESP_OK) {
+          LogDebug("Sending to M5 'squirts done' failed");
+        }
+      }
+    }
   }
-if (cum_on==0){
-  squirts=0;
-
+  else  // cum_on == 0 (stopped)
+  {
+    squirts = 0;
+    stepper.setTargetPositionToStop(); // Decelerate to stop
+    digitalWrite(MOTOR_ENA_PIN, HIGH);
+  }
 }
-  
-}
+// =============================================================================
 
 void espNowRemoteTask(void *pvParameters)
 {
